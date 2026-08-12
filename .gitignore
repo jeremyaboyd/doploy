@@ -1,0 +1,15 @@
+# Build output
+/doploy
+/doploy.exe
+/dist/
+
+# Real deployment specs and their secrets. The examples/ copies are safe;
+# a doploy.yml at the repo root would be someone's actual infrastructure.
+/doploy.yml
+/doploy.yaml
+.env
+!examples/.env.example
+
+# Go
+*.test
+*.out

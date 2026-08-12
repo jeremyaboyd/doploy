@@ -1,0 +1,91 @@
+# A two-droplet deployment: a public web host and a private worker.
+#
+#   doploy calculate          # what this costs per month
+#   doploy deploy --dry-run   # what it would create
+#   doploy deploy             # actually do it
+#
+# Values in ${...} come from the environment or a .env file beside this one.
+
+version: "1"
+project: example-app
+
+defaults:
+  region: nyc3
+  size: s-1vcpu-1gb
+
+  # The Docker 1-Click ships with Docker and the compose plugin already
+  # installed, so deploys skip the bootstrap step. `doploy list images` shows
+  # the rest. For a plain OS instead, use `doploy list oses` and let doploy
+  # install Docker itself.
+  image: docker-20-04
+
+  # Names, fingerprints, or IDs of keys already on your DigitalOcean account.
+  # `doploy deploy` needs the matching private key locally to connect.
+  ssh_keys:
+    - my-laptop
+
+  monitoring: true
+
+droplets:
+  web:
+    # Services that do not name a droplet land here.
+    default: true
+    size: s-2vcpu-4gb
+
+    firewall:
+      inbound: ["80", "443"]
+      # Without ssh_sources, port 22 is open to the world. Narrow it.
+      ssh_sources: ["0.0.0.0/0"]
+
+    volumes:
+      - name: uploads
+        size_gb: 50
+        # Mounted at /mnt/uploads unless mount_path says otherwise.
+
+  worker:
+    size: s-1vcpu-2gb
+    tags: [background]
+
+services:
+  api:
+    image: ghcr.io/example/api:${TAG:-latest}
+    ports: ["80:8080"]
+    depends_on: [redis]
+    environment:
+      REDIS_URL: redis://redis:6379
+      # :? makes this a hard requirement -- the deploy stops with this message
+      # rather than starting a container that cannot reach its database.
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env or the environment}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - /mnt/uploads:/var/lib/api/uploads
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+
+  redis:
+    image: redis:7-alpine
+    # No source path, so this is a docker named volume, declared automatically
+    # in the generated compose file.
+    volumes:
+      - redisdata:/data
+
+  cruncher:
+    droplet: worker
+    image: ghcr.io/example/cruncher:${TAG:-latest}
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env or the environment}
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+
+# Only needed for private images. Keep the actual values in .env.
+registries:
+  ghcr.io:
+    username: ${GITHUB_USER}
+    password: ${GITHUB_TOKEN}
