@@ -50,6 +50,7 @@ bash and zsh. Add an alias in a shell where it does not collide.`,
 		newAuthCmd(),
 		newListCmd(),
 		newDeployCmd(),
+		newDestroyCmd(),
 		newCalculateCmd(),
 	)
 

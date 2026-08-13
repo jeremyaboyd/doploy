@@ -270,6 +270,7 @@ doploy list regions               # deployment regions
 
 doploy calculate                  # estimated monthly cost of the spec
 doploy deploy                     # provision, then deploy
+doploy destroy                    # tear it all down again
 ```
 
 Every command takes `--output json` for scripting.
@@ -289,6 +290,29 @@ doploy deploy --yes                     # skip the confirmation prompt
 The first run for a spec shows what it will create and what it will cost, then
 asks. Redeploys onto existing droplets add no recurring charge, so they proceed
 without a prompt.
+
+### destroy
+
+```bash
+doploy destroy --dry-run                # list what would be deleted
+doploy destroy                          # delete droplets, firewalls, tags; KEEP volumes
+doploy destroy --volumes                # delete the volumes and their data too
+doploy destroy --project myapp          # no spec file needed
+```
+
+Discovery goes through the same ownership tags deploy uses, so destroy removes
+exactly what deploy manages — including droplets a stale spec no longer
+mentions. It shows the full list and asks before deleting anything (`--yes` to
+skip, for scripts).
+
+**Volumes are kept by default.** They are where the data lives, and recreating
+the droplets later reattaches them intact. Deleting data requires saying
+`--volumes` out loud. Droplets are removed first, which detaches their volumes;
+destroy waits for the detach before deleting a volume, since the API refuses to
+delete one that is still attached.
+
+`--project` exists because teardown must not depend on still having the spec
+file that created things.
 
 ### calculate
 
@@ -367,9 +391,6 @@ keep credentials in `.env` or the environment, not committed in `doploy.yml`.
 Deliberately out of scope for this pass, in rough order of how much they would
 be missed:
 
-- **`doploy destroy`** — no teardown command. Delete droplets in the console or
-  with `doctl`. The tags make them easy to find:
-  `doctl compute droplet list --tag-name doploy:project:myapp`.
 - **`doploy logs` / `doploy status`** — SSH in and use `docker compose` directly;
   everything is under `/opt/doploy/<project>/`.
 - **Building images locally.** `build:` builds on the *droplet*. doploy does not
