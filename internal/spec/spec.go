@@ -66,8 +66,73 @@ type Droplet struct {
 	Volumes  []*Volume `yaml:"volumes"`
 	Firewall *Firewall `yaml:"firewall"`
 
+	// Setup runs on the host before any containers start. It exists for
+	// software that should not be containerised -- a database being the usual
+	// case -- and runs whether or not the droplet has services.
+	Setup *Setup `yaml:"setup"`
+
+	// DependsOn orders deployment: every named droplet is fully set up before
+	// this one is touched.
+	DependsOn []string `yaml:"depends_on"`
+
 	// UserData is appended to the cloud-init script doploy generates.
 	UserData string `yaml:"user_data"`
+}
+
+// Setup describes host-level provisioning: apt packages, uploaded files, and
+// shell commands, applied in that order.
+//
+// Commands are re-run on every deploy, so they have to be idempotent. The
+// generated scripts in examples/ show the usual guard patterns.
+type Setup struct {
+	// Packages are installed with apt-get.
+	Packages []string `yaml:"packages"`
+
+	// Env is written to a 0600 file on the droplet and sourced before every Run
+	// entry. Secrets belong here rather than inline in Run: values passed on a
+	// command line show up in the droplet's process list and in doploy's own
+	// output, and this keeps them out of both.
+	Env map[string]string `yaml:"env"`
+
+	// Files are uploaded before Run executes. Contents are interpolated, so a
+	// config template can reference another droplet's address.
+	Files []*SetupFile `yaml:"files"`
+
+	// Run is a list of shell commands or local script paths. An entry ending in
+	// .sh that exists on disk is uploaded and executed; anything else runs
+	// inline.
+	Run []string `yaml:"run"`
+}
+
+// SetupFile is one file copied to the droplet during setup.
+type SetupFile struct {
+	// Source is a path relative to the spec file.
+	Source string `yaml:"source"`
+
+	// Dest is the absolute path on the droplet.
+	Dest string `yaml:"dest"`
+
+	// Mode defaults to 0644.
+	Mode string `yaml:"mode"`
+
+	// Template enables variable interpolation of the file's contents. Off by
+	// default so a SQL file full of dollar-quoted strings is left alone.
+	Template bool `yaml:"template"`
+}
+
+// Build describes an image built on the droplet rather than pulled.
+//
+// doploy uploads the context and lets the remote engine build. That keeps an
+// example runnable without a registry, at the cost of building once per host.
+type Build struct {
+	// Context is a directory path relative to the spec file.
+	Context string `yaml:"context"`
+
+	// Dockerfile is relative to Context. Defaults to "Dockerfile".
+	Dockerfile string `yaml:"dockerfile"`
+
+	// Args become --build-arg values.
+	Args map[string]string `yaml:"args"`
 }
 
 // Volume is a DigitalOcean block storage volume attached to a droplet.
@@ -104,7 +169,13 @@ type Service struct {
 	// defines exactly one droplet or marks one as default.
 	Droplet string `yaml:"droplet"`
 
-	Image       string            `yaml:"image"`
+	Image string `yaml:"image"`
+
+	// Build, when set, makes doploy upload the context and build on the droplet
+	// instead of pulling. Exactly one of Image or Build is required; with both,
+	// Image names the built result.
+	Build *Build `yaml:"build"`
+
 	Command     StringOrSlice     `yaml:"command"`
 	Entrypoint  StringOrSlice     `yaml:"entrypoint"`
 	Ports       []string          `yaml:"ports"`

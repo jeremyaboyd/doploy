@@ -3,6 +3,7 @@ package spec
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -107,6 +108,36 @@ EMPTY=
 	for key, expected := range want {
 		if values[key] != expected {
 			t.Errorf("%s = %q, want %q", key, values[key], expected)
+		}
+	}
+}
+
+func TestLoadDotEnvStripsByteOrderMark(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+
+	// PowerShell's `Set-Content -Encoding utf8` and several Windows editors
+	// prepend a BOM. Left in place it becomes part of the first key's name, and
+	// the resulting "variable is not set" error points nowhere useful.
+	content := "\ufeffFIRST_KEY=first\nSECOND_KEY=second\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	values, err := LoadDotEnv(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if values["FIRST_KEY"] != "first" {
+		t.Errorf("FIRST_KEY = %q, want the BOM stripped from the key name", values["FIRST_KEY"])
+	}
+	if values["SECOND_KEY"] != "second" {
+		t.Errorf("SECOND_KEY = %q", values["SECOND_KEY"])
+	}
+	for key := range values {
+		if strings.HasPrefix(key, "\ufeff") {
+			t.Errorf("key %q still carries a BOM", key)
 		}
 	}
 }

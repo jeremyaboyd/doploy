@@ -59,6 +59,13 @@ func Interpolate(s string, lookup Lookup) (string, error) {
 			return ""
 		}
 
+		// Runtime variables name things that do not exist yet -- a droplet's
+		// address is only known once it has been created. Leave the reference
+		// untouched here; ResolveRuntime substitutes it after provisioning.
+		if IsRuntimeVar(name) {
+			return match
+		}
+
 		value, found := lookup(name)
 		switch op {
 		case ":-":
@@ -135,7 +142,16 @@ func LoadDotEnv(path string) (map[string]string, error) {
 
 	for scanner.Scan() {
 		line++
-		text := strings.TrimSpace(scanner.Text())
+		text := scanner.Text()
+
+		// Editors on Windows routinely save UTF-8 with a byte order mark. Left
+		// in place it becomes part of the first key's name, and the resulting
+		// "variable is not set" error points nowhere useful.
+		if line == 1 {
+			text = strings.TrimPrefix(text, "\ufeff")
+		}
+
+		text = strings.TrimSpace(text)
 		if text == "" || strings.HasPrefix(text, "#") {
 			continue
 		}

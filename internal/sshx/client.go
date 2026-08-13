@@ -161,6 +161,30 @@ func (c *Client) WriteFile(remotePath string, content []byte, mode string) error
 	return nil
 }
 
+// WriteArchive uploads a gzipped tar and extracts it into remoteDir.
+//
+// The directory is replaced rather than merged: a file deleted locally must not
+// survive on the droplet and end up in the next image build.
+func (c *Client) WriteArchive(remoteDir string, tarGz []byte) error {
+	encoded := base64.StdEncoding.EncodeToString(tarGz)
+	staging := remoteDir + ".doploy.new"
+
+	script := strings.Join([]string{
+		"set -eu",
+		"rm -rf " + shellQuote(staging),
+		"mkdir -p " + shellQuote(staging),
+		fmt.Sprintf("printf '%%s' %s | base64 -d | tar xzf - -C %s", shellQuote(encoded), shellQuote(staging)),
+		"rm -rf " + shellQuote(remoteDir),
+		"mkdir -p " + shellQuote(path.Dir(remoteDir)),
+		fmt.Sprintf("mv %s %s", shellQuote(staging), shellQuote(remoteDir)),
+	}, "\n")
+
+	if _, err := c.Run(script); err != nil {
+		return fmt.Errorf("uploading archive to %s: %w", remoteDir, err)
+	}
+	return nil
+}
+
 // shellQuote wraps a string in single quotes, escaping any it contains.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"

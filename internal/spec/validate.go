@@ -2,6 +2,9 @@ package spec
 
 import (
 	"fmt"
+	"os"
+	"path"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -43,11 +46,95 @@ func (s *Spec) Validate() error {
 
 	errs = append(errs, s.validateDroplets()...)
 	errs = append(errs, s.validateServices()...)
+	errs = append(errs, s.validateDropletDependencies()...)
+	errs = append(errs, s.ValidateRuntimeReferences()...)
+	errs = append(errs, s.validateLocalPaths()...)
 
 	if len(errs) > 0 {
 		return errs
 	}
 	return nil
+}
+
+// validateDropletDependencies checks depends_on between droplets and rejects
+// cycles, which would otherwise make deploy order undefined.
+func (s *Spec) validateDropletDependencies() Errors {
+	var errs Errors
+
+	for _, name := range s.DropletNames() {
+		for _, dep := range s.Droplets[name].DependsOn {
+			if dep == name {
+				errs = append(errs, fmt.Sprintf("droplet %q depends on itself", name))
+				continue
+			}
+			if _, ok := s.Droplets[dep]; !ok {
+				errs = append(errs, fmt.Sprintf("droplet %q depends on %q, which is not defined", name, dep))
+			}
+		}
+	}
+
+	if _, err := s.DeployOrder(); err != nil {
+		errs = append(errs, err.Error())
+	}
+	return errs
+}
+
+// validateLocalPaths checks that setup sources and build contexts exist on this
+// machine, so a typo fails before any droplet is created.
+func (s *Spec) validateLocalPaths() Errors {
+	var errs Errors
+	base := filepath.Dir(s.Path)
+
+	for _, name := range s.DropletNames() {
+		setup := s.Droplets[name].Setup
+		if setup == nil {
+			continue
+		}
+		for _, file := range setup.Files {
+			if file.Source == "" || file.Dest == "" {
+				errs = append(errs, fmt.Sprintf("droplet %q setup: every file needs both `source` and `dest`", name))
+				continue
+			}
+			// Dest is a path on the Linux droplet, so it is checked with the
+			// slash-based rules rather than the host's. filepath.IsAbs would
+			// reject "/opt/app" when doploy runs on Windows.
+			if !path.IsAbs(file.Dest) {
+				errs = append(errs, fmt.Sprintf("droplet %q setup: dest %q must be an absolute path on the droplet", name, file.Dest))
+			}
+			if _, err := os.Stat(filepath.Join(base, file.Source)); err != nil {
+				errs = append(errs, fmt.Sprintf("droplet %q setup: source %q not found relative to %s", name, file.Source, base))
+			}
+		}
+	}
+
+	for _, name := range s.ServiceNames() {
+		build := s.Services[name].Build
+		if build == nil {
+			continue
+		}
+		if build.Context == "" {
+			errs = append(errs, fmt.Sprintf("service %q build: `context` is required", name))
+			continue
+		}
+
+		context := filepath.Join(base, build.Context)
+		info, err := os.Stat(context)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Sprintf("service %q build: context %q not found relative to %s", name, build.Context, base))
+		case !info.IsDir():
+			errs = append(errs, fmt.Sprintf("service %q build: context %q is not a directory", name, build.Context))
+		default:
+			dockerfile := build.Dockerfile
+			if dockerfile == "" {
+				dockerfile = "Dockerfile"
+			}
+			if _, err := os.Stat(filepath.Join(context, dockerfile)); err != nil {
+				errs = append(errs, fmt.Sprintf("service %q build: no %s in %s", name, dockerfile, build.Context))
+			}
+		}
+	}
+	return errs
 }
 
 func (s *Spec) validateDroplets() Errors {
@@ -104,8 +191,8 @@ func (s *Spec) validateServices() Errors {
 		if !namePattern.MatchString(name) {
 			errs = append(errs, fmt.Sprintf("service %q: name must be lowercase alphanumeric with dashes", name))
 		}
-		if svc.Image == "" {
-			errs = append(errs, fmt.Sprintf("service %q: `image` is required (doploy deploys prebuilt images, it does not build them)", name))
+		if svc.Image == "" && svc.Build == nil {
+			errs = append(errs, fmt.Sprintf("service %q: needs either `image` (pull a prebuilt image) or `build` (build it on the droplet)", name))
 		}
 		if _, ok := s.Droplets[svc.Droplet]; !ok {
 			errs = append(errs, fmt.Sprintf("service %q targets droplet %q, which is not defined", name, svc.Droplet))

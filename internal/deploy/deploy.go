@@ -41,6 +41,9 @@ type Options struct {
 	// DryRun plans without changing anything.
 	DryRun bool
 
+	// SkipSetup leaves host-level setup blocks alone.
+	SkipSetup bool
+
 	// ConnectTimeout bounds how long to wait for sshd on a new droplet.
 	ConnectTimeout time.Duration
 }
@@ -50,6 +53,9 @@ type Deployer struct {
 	Client *godo.Client
 	Spec   *spec.Spec
 	Opts   Options
+
+	// vars holds cross-droplet values resolved after provisioning.
+	vars spec.RuntimeVars
 }
 
 // Summary reports the outcome for one droplet.
@@ -63,9 +69,9 @@ type Summary struct {
 
 // Run provisions and deploys.
 //
-// Droplets are handled one at a time: deployments are usually one to three
-// hosts, and serial output is far easier to read when something goes wrong than
-// interleaved parallel logs.
+// Droplets are handled one at a time, in dependency order. Deployments are
+// usually a handful of hosts, and serial output is far easier to read when
+// something goes wrong than interleaved parallel logs.
 func (d *Deployer) Run(ctx context.Context) ([]Summary, error) {
 	targets, err := d.targetDroplets()
 	if err != nil {
@@ -81,6 +87,17 @@ func (d *Deployer) Run(ctx context.Context) ([]Summary, error) {
 
 	if d.Opts.DryRun {
 		return d.planSummaries(targets, result), nil
+	}
+
+	// Every droplet exists now, so addresses that could not be known when the
+	// spec was parsed can finally be substituted. This has to happen before any
+	// compose file is rendered or setup script uploaded.
+	d.vars = runtimeVarsFrom(result)
+	if err := d.Spec.ResolveRuntime(d.vars); err != nil {
+		return nil, err
+	}
+	if refs := d.Spec.RuntimeReferences(); len(refs) > 0 {
+		ui.Substep("resolved %s", strings.Join(refs, ", "))
 	}
 
 	signer, err := sshx.LoadSigner(d.Opts.SSHKeyPath)
@@ -106,6 +123,26 @@ func (d *Deployer) Run(ctx context.Context) ([]Summary, error) {
 		summaries = append(summaries, summary)
 	}
 	return summaries, nil
+}
+
+// runtimeVarsFrom collects the addresses of every provisioned droplet.
+//
+// Empty values are deliberately not recorded: an unset key produces a clear
+// "cannot be resolved" error, whereas recording "" would silently substitute an
+// empty host into a connection string.
+func runtimeVarsFrom(result *provision.Result) spec.RuntimeVars {
+	vars := spec.RuntimeVars{}
+
+	for _, state := range result.Droplets {
+		if state.PrivateIP != "" {
+			vars.Set(state.Name, spec.FieldPrivateIP, state.PrivateIP)
+		}
+		if state.PublicIP != "" {
+			vars.Set(state.Name, spec.FieldPublicIP, state.PublicIP)
+		}
+		vars.Set(state.Name, spec.FieldName, state.Name)
+	}
+	return vars
 }
 
 // deployDroplet connects to one host, prepares it, and brings its services up.
@@ -145,6 +182,25 @@ func (d *Deployer) deployDroplet(ctx context.Context, state *provision.DropletSt
 
 	out := &logWriter{prefix: state.Name}
 
+	// Block storage first: setup may want to put a database's data directory
+	// on it, and containers may bind-mount from it.
+	if err := d.mountVolumes(client, state, out); err != nil {
+		return summary, err
+	}
+
+	if !d.Opts.SkipSetup {
+		if err := d.runSetup(client, state, out); err != nil {
+			return summary, err
+		}
+	}
+
+	// A droplet with no services runs no containers, so it needs neither Docker
+	// nor a compose file. That is the whole point of a setup-only host.
+	if !d.Spec.HasServices(state.Name) {
+		summary.Status = "setup only"
+		return summary, nil
+	}
+
 	if d.Opts.Bootstrap {
 		ui.Substep("ensuring docker is installed")
 		if err := client.Stream(dockerBootstrap, out); err != nil {
@@ -152,7 +208,7 @@ func (d *Deployer) deployDroplet(ctx context.Context, state *provision.DropletSt
 		}
 	}
 
-	if err := d.mountVolumes(client, state, out); err != nil {
+	if err := d.uploadBuildContexts(client, state.Name); err != nil {
 		return summary, err
 	}
 
@@ -164,14 +220,40 @@ func (d *Deployer) deployDroplet(ctx context.Context, state *provision.DropletSt
 		return summary, err
 	}
 
-	ui.Substep("pulling images and starting services")
-	script := composeUpScript(d.Spec.RemoteDir(), d.Spec.ComposeProjectName(), d.Opts.Wait, d.Opts.Prune)
+	hasBuilds := len(d.Spec.BuildServicesOn(state.Name)) > 0
+	if hasBuilds {
+		ui.Substep("building images on the droplet")
+	} else {
+		ui.Substep("pulling images and starting services")
+	}
+
+	script := composeUpScript(d.Spec.RemoteDir(), d.Spec.ComposeProjectName(), d.Opts.Wait, d.Opts.Prune, hasBuilds)
 	if err := client.Stream(script, out); err != nil {
 		return summary, fmt.Errorf("bringing the stack up: %w", err)
 	}
 
 	summary.Status = d.readStatus(client)
 	return summary, nil
+}
+
+// uploadBuildContexts packs and ships the source for every service that builds
+// on the droplet rather than pulling a prebuilt image.
+func (d *Deployer) uploadBuildContexts(client *sshx.Client, droplet string) error {
+	for _, svc := range d.Spec.BuildServicesOn(droplet) {
+		local := d.Spec.LocalPath(svc.Build.Context)
+		remote := d.Spec.RemoteBuildDir(svc.Name)
+
+		packed, err := packContext(local)
+		if err != nil {
+			return fmt.Errorf("service %q: %w", svc.Name, err)
+		}
+
+		ui.Substep("uploading build context for %s (%s)", svc.Name, humanBytes(len(packed)))
+		if err := client.WriteArchive(remote, packed); err != nil {
+			return fmt.Errorf("service %q: %w", svc.Name, err)
+		}
+	}
+	return nil
 }
 
 // mountVolumes formats and mounts each attached block volume.
@@ -196,6 +278,9 @@ func (d *Deployer) writeComposeFile(client *sshx.Client, droplet string) error {
 	content, err := d.Spec.ComposeFile(droplet)
 	if err != nil {
 		return err
+	}
+	if content == nil {
+		return nil
 	}
 
 	remote := d.remoteComposePath()
@@ -250,23 +335,30 @@ func (d *Deployer) readStatus(client *sshx.Client) string {
 	return fmt.Sprintf("%d/%d running", running, total)
 }
 
+// targetDroplets returns the droplets to deploy, in dependency order.
 func (d *Deployer) targetDroplets() ([]string, error) {
-	all := d.Spec.DropletNames()
+	ordered, err := d.Spec.DeployOrder()
+	if err != nil {
+		return nil, err
+	}
 	if len(d.Opts.Only) == 0 {
-		return all, nil
+		return ordered, nil
 	}
 
-	valid := map[string]bool{}
-	for _, name := range all {
-		valid[name] = true
-	}
-
-	var selected []string
+	wanted := map[string]bool{}
 	for _, want := range d.Opts.Only {
-		if !valid[want] {
+		if _, ok := d.Spec.Droplets[want]; !ok {
 			return nil, fmt.Errorf("droplet %q is not defined in %s", want, d.Spec.Path)
 		}
-		selected = append(selected, want)
+		wanted[want] = true
+	}
+
+	// Preserve dependency order within the filtered selection.
+	var selected []string
+	for _, name := range ordered {
+		if wanted[name] {
+			selected = append(selected, name)
+		}
 	}
 	return selected, nil
 }
@@ -310,6 +402,17 @@ func plural(n int, noun string) string {
 		return fmt.Sprintf("1 %s", noun)
 	}
 	return fmt.Sprintf("%d %ss", n, noun)
+}
+
+func humanBytes(n int) string {
+	switch {
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KiB", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
 }
 
 // logWriter prefixes streamed remote output so it is obvious which host it came

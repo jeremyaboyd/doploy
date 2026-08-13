@@ -25,6 +25,13 @@ func Find(explicit string) (string, error) {
 	return "", fmt.Errorf("no %s found in the current directory (use --file to point at one)", DefaultFilenames[0])
 }
 
+// LocalPath resolves a spec-relative path against the directory holding the
+// spec file, so paths in doploy.yml mean the same thing regardless of where the
+// command is run from.
+func (s *Spec) LocalPath(rel string) string {
+	return filepath.Join(filepath.Dir(s.Path), filepath.FromSlash(rel))
+}
+
 // Load reads, interpolates, resolves, and validates a spec file.
 func Load(path string) (*Spec, error) {
 	data, err := os.ReadFile(path)

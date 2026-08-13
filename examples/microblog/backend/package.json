@@ -1,0 +1,22 @@
+{
+  "name": "microblog-api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Microblog API for the doploy example",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^1.4.5-lts.1",
+    "pg": "^8.12.0"
+  }
+}

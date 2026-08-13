@@ -164,6 +164,97 @@ projects can both call a volume `data`.
 doploy never resizes or deletes a volume. Shrinking is impossible and deleting
 destroys data; both are left to a deliberate manual action.
 
+### Host setup, for things that should not be containers
+
+A droplet can run host-level provisioning before any container starts. This is
+how you get a database installed from apt rather than run as a container:
+
+```yaml
+droplets:
+  db:
+    setup:
+      packages: [postgresql, postgresql-contrib]
+      env:
+        APP_DB_PASSWORD: ${POSTGRES_PASSWORD:?}   # written 0600, sourced per command
+      files:
+        - source: db/init.sql
+          dest: /opt/app/init.sql
+      run:
+        - db/setup-postgres.sh                    # uploaded and executed
+        - systemctl enable --now postgresql       # or run inline
+```
+
+Order is packages, then files, then commands. A `run` entry naming a `.sh` file
+on disk is uploaded and executed; anything else runs inline.
+
+**Setup runs on every deploy**, not just the first, so a changed init script
+actually takes effect. That puts the burden of idempotency on your scripts.
+
+Secrets belong in `setup.env` rather than inline in `run`. Values passed on a
+command line appear in the droplet's process list, and doploy deliberately does
+not echo inline setup commands for the same reason.
+
+A droplet with a `setup` block and no services runs no containers at all, and
+skips Docker entirely.
+
+### Cross-droplet addresses
+
+A droplet's address does not exist until it is created, so a spec that wires one
+host to another names it instead:
+
+```yaml
+services:
+  api:
+    environment:
+      DATABASE_URL: postgres://app:pw@${droplet.db.private_ip}:5432/app
+```
+
+Available fields are `private_ip`, `public_ip`, and `name`. These references
+survive the initial parse untouched. doploy provisions everything first, then
+substitutes real addresses, then renders compose files and runs setup — so they
+are correct on the first deploy and *rewritten* on every subsequent one.
+
+Substitution is surgical: only `${droplet.*}` is touched, which is what makes it
+safe to run over shell scripts full of `$VAR` and `$$`.
+
+An unresolvable reference is an error, never an empty string. A silently empty
+database host fails much later, on the droplet, where it is far harder to
+diagnose.
+
+### Building on the droplet
+
+A service can build from source instead of pulling:
+
+```yaml
+services:
+  api:
+    build:
+      context: backend
+      dockerfile: Dockerfile   # optional, relative to context
+      args:
+        NODE_ENV: production
+```
+
+doploy packs the context (honouring `.dockerignore`, always skipping `.git` and
+`node_modules`), uploads it, and lets the remote engine build. That makes a
+project runnable with no registry at all, at the cost of building once per host.
+Contexts are capped at 64 MiB — a forgotten `node_modules` fails loudly instead
+of turning a deploy into a slow mystery.
+
+### Deploy order
+
+Droplets can declare dependencies, which orders the whole deploy:
+
+```yaml
+droplets:
+  web:
+    depends_on: [db]
+```
+
+`db` is fully set up before `web` is touched. Cycles are rejected at load time.
+This is distinct from a service's `depends_on`, which only orders containers
+within one host.
+
 ## Commands
 
 ```bash
@@ -179,6 +270,7 @@ doploy list regions               # deployment regions
 
 doploy calculate                  # estimated monthly cost of the spec
 doploy deploy                     # provision, then deploy
+doploy destroy                    # tear it all down again
 ```
 
 Every command takes `--output json` for scripting.
@@ -190,6 +282,7 @@ doploy deploy --dry-run                 # plan only, change nothing
 doploy deploy --droplet web             # limit to one droplet (repeatable)
 doploy deploy --wait                    # block until healthchecks pass
 doploy deploy --no-bootstrap            # skip the Docker install step
+doploy deploy --skip-setup              # containers only, leave host setup alone
 doploy deploy --ssh-key ~/.ssh/deploy   # specific private key
 doploy deploy --yes                     # skip the confirmation prompt
 ```
@@ -197,6 +290,29 @@ doploy deploy --yes                     # skip the confirmation prompt
 The first run for a spec shows what it will create and what it will cost, then
 asks. Redeploys onto existing droplets add no recurring charge, so they proceed
 without a prompt.
+
+### destroy
+
+```bash
+doploy destroy --dry-run                # list what would be deleted
+doploy destroy                          # delete droplets, firewalls, tags; KEEP volumes
+doploy destroy --volumes                # delete the volumes and their data too
+doploy destroy --project myapp          # no spec file needed
+```
+
+Discovery goes through the same ownership tags deploy uses, so destroy removes
+exactly what deploy manages — including droplets a stale spec no longer
+mentions. It shows the full list and asks before deleting anything (`--yes` to
+skip, for scripts).
+
+**Volumes are kept by default.** They are where the data lives, and recreating
+the droplets later reattaches them intact. Deleting data requires saying
+`--volumes` out loud. Droplets are removed first, which detaches their volumes;
+destroy waits for the detach before deleting a volume, since the API refuses to
+delete one that is still attached.
+
+`--project` exists because teardown must not depend on still having the spec
+file that created things.
 
 ### calculate
 
@@ -275,13 +391,12 @@ keep credentials in `.env` or the environment, not committed in `doploy.yml`.
 Deliberately out of scope for this pass, in rough order of how much they would
 be missed:
 
-- **`doploy destroy`** — no teardown command. Delete droplets in the console or
-  with `doctl`. The tags make them easy to find:
-  `doctl compute droplet list --tag-name doploy:project:myapp`.
 - **`doploy logs` / `doploy status`** — SSH in and use `docker compose` directly;
   everything is under `/opt/doploy/<project>/`.
-- **Building images.** doploy deploys prebuilt images and does not read
-  Dockerfiles. Build and push in CI.
+- **Building images locally.** `build:` builds on the *droplet*. doploy does not
+  build on your machine or push to a registry, so a large context is uploaded
+  and compiled once per host. For anything beyond a small app, build in CI and
+  reference the pushed image instead.
 - **Load balancers, managed databases, DNS records, reserved IPs.**
 - **Rollback.** A failed deploy leaves the previous containers running if the
   pull fails, but there is no version history to roll back to.
@@ -302,11 +417,22 @@ The layers, roughly outside-in:
 | `internal/spec` | the `doploy.yml` schema, interpolation, validation, compose generation |
 | `internal/provision` | tag-based reconcile of droplets, volumes, firewalls |
 | `internal/deploy` | SSH orchestration: bootstrap, mount, upload, compose up |
-| `internal/sshx` | key discovery, TOFU host keys, file upload over exec |
+| `internal/sshx` | key discovery, TOFU host keys, file and archive upload over exec |
+| `internal/archive` | packing build contexts, with `.dockerignore` handling |
 | `internal/pricing` | cost estimation |
 | `internal/doclient` | godo client and pagination |
 | `internal/config` | credential storage |
 
 Everything that does not need the API is unit tested — spec parsing,
-interpolation, validation, compose generation, pricing, and tag round-tripping.
-The API and SSH layers are not, which is the main gap in the test suite.
+interpolation, validation, compose generation, runtime address resolution,
+deploy ordering, context packing, pricing, and tag round-tripping. Both shipped
+examples are loaded by the test suite, so the documentation cannot silently rot.
+The API and SSH layers are not tested, which is the main gap.
+
+## Examples
+
+- [`examples/doploy.yml`](examples/doploy.yml) — a two-droplet spec covering the
+  common options.
+- [`examples/microblog/`](examples/microblog/) — a working React + Node blog with
+  native Postgres on its own droplet, showing host setup, cross-droplet
+  addresses, and building on the droplet.
