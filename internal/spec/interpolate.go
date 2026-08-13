@@ -142,7 +142,16 @@ func LoadDotEnv(path string) (map[string]string, error) {
 
 	for scanner.Scan() {
 		line++
-		text := strings.TrimSpace(scanner.Text())
+		text := scanner.Text()
+
+		// Editors on Windows routinely save UTF-8 with a byte order mark. Left
+		// in place it becomes part of the first key's name, and the resulting
+		// "variable is not set" error points nowhere useful.
+		if line == 1 {
+			text = strings.TrimPrefix(text, "\ufeff")
+		}
+
+		text = strings.TrimSpace(text)
 		if text == "" || strings.HasPrefix(text, "#") {
 			continue
 		}

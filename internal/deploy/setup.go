@@ -138,20 +138,22 @@ func (d *Deployer) uploadSetupFile(client *sshx.Client, file *spec.SetupFile) er
 // rather than being crammed into YAML. Anything else runs inline.
 func (d *Deployer) runSetupCommand(client *sshx.Client, out *logWriter, droplet string, index int, command, envFile string) error {
 	if local, ok := d.resolveScript(command); ok {
+		// Script contents are uploaded verbatim, never interpolated.
+		//
+		// Substituting into a shell script means any ${droplet...} shaped text
+		// anywhere in it -- including inside a comment explaining the feature --
+		// becomes a deploy-breaking reference. Scripts read their values from
+		// the setup environment instead, which is explicit and cannot misfire.
+		// Files that genuinely want substitution opt in with `template: true`.
 		content, err := os.ReadFile(local)
 		if err != nil {
 			return fmt.Errorf("reading setup script %s: %w", command, err)
 		}
 
-		resolved, err := d.vars.ResolveString(string(content))
-		if err != nil {
-			return fmt.Errorf("setup script %s: %w", command, err)
-		}
-
 		remote := path.Join(remoteSetupDir, fmt.Sprintf("%02d-%s", index, path.Base(toSlash(command))))
 		ui.Substep("running %s", command)
 
-		if err := client.WriteFile(remote, []byte(resolved), "0700"); err != nil {
+		if err := client.WriteFile(remote, content, "0700"); err != nil {
 			return err
 		}
 		if err := client.Stream(withSetupEnv(envFile, "bash "+shellQuote(remote)), out); err != nil {
@@ -196,10 +198,26 @@ func (d *Deployer) resolveScript(command string) (string, bool) {
 	return local, true
 }
 
-// aptInstallScript installs packages non-interactively.
+// waitForAPT is prepended to anything that touches apt.
 //
-// apt-get update is retried because cloud-init often still holds the dpkg lock
-// on a freshly created droplet.
+// A freshly created droplet is still running cloud-init, which runs its own
+// apt-get and holds the dpkg lock. Racing it produces "Could not get lock
+// /var/lib/dpkg/lock-frontend" and exit 100, which is the single most common
+// way a first deploy fails.
+//
+// Two defences: wait for cloud-init to declare itself done, and ask apt to
+// wait for the lock rather than failing immediately.
+const waitForAPT = `
+export DEBIAN_FRONTEND=noninteractive
+APT_OPTS="-o DPkg::Lock::Timeout=600"
+
+if command -v cloud-init >/dev/null 2>&1; then
+  echo "waiting for cloud-init to finish"
+  cloud-init status --wait >/dev/null 2>&1 || true
+fi
+`
+
+// aptInstallScript installs packages non-interactively.
 func aptInstallScript(packages []string) string {
 	quoted := make([]string, len(packages))
 	for i, pkg := range packages {
@@ -208,18 +226,32 @@ func aptInstallScript(packages []string) string {
 
 	return fmt.Sprintf(`
 set -eu
-export DEBIAN_FRONTEND=noninteractive
+%s
 
-for attempt in 1 2 3 4 5 6; do
-  if apt-get update -qq; then
-    break
+# Retry around the lock wait as well: unattended-upgrades can start a second
+# time just as the first one releases.
+attempt=1
+until apt-get $APT_OPTS update -qq; do
+  if [ "$attempt" -ge 5 ]; then
+    echo "apt-get update still failing after $attempt attempts" >&2
+    exit 1
   fi
-  echo "apt-get update failed (attempt $attempt), another process may hold the lock; retrying"
+  echo "apt-get update failed (attempt $attempt); retrying"
+  attempt=$((attempt + 1))
   sleep 10
 done
 
-apt-get install -y -qq --no-install-recommends %s
-`, strings.Join(quoted, " "))
+attempt=1
+until apt-get $APT_OPTS install -y -qq --no-install-recommends %s; do
+  if [ "$attempt" -ge 5 ]; then
+    echo "apt-get install still failing after $attempt attempts" >&2
+    exit 1
+  fi
+  echo "apt-get install failed (attempt $attempt); retrying"
+  attempt=$((attempt + 1))
+  sleep 15
+done
+`, waitForAPT, strings.Join(quoted, " "))
 }
 
 // packContext builds the upload archive for a build context.

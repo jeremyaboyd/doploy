@@ -32,9 +32,19 @@ droplets:
         size_gb: 20 # the cluster's data directory is moved here
 
     firewall:
-      # No public ingress at all. Postgres binds only to the private interface,
-      # so the only way in is over the VPC or SSH.
-      inbound: []
+      # DigitalOcean cloud firewalls filter VPC traffic too, not just public
+      # traffic, so the web droplet needs an explicit rule to reach Postgres.
+      # The source is the private range rather than a specific address because
+      # firewalls are applied during provisioning, before any droplet has an
+      # address to reference.
+      #
+      # This is the coarse layer. The precise one is pg_hba.conf, which the
+      # setup script pins to the web droplet's exact address, and Postgres
+      # binds only to the private interface, so none of this is reachable from
+      # the internet.
+      inbound: ["5432"]
+      sources:
+        - 10.0.0.0/8
       ssh_sources:
         - ${ADMIN_CIDR:-0.0.0.0/0}
 
@@ -116,7 +126,10 @@ services:
     ports: ["80:80"]
     depends_on: [api]
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost/healthz"]
+      # 127.0.0.1, not localhost. Inside the container localhost resolves to
+      # ::1 first, and nginx only listens on IPv4, so the check gets connection
+      # refused while the site is serving perfectly well.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
       interval: 10s
       timeout: 3s
       retries: 5

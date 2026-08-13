@@ -4,11 +4,13 @@
 #
 # doploy uploads and runs this on every deploy, so every step has to be safe to
 # repeat. The parts that change between deploys are the addresses: DB_LISTEN_IP
-# and ALLOWED_CLIENT_IP come from doploy's ${droplet.*.private_ip} variables and
-# are rewritten each time, which is what lets the API connect after the web
-# droplet is rebuilt with a new address.
+# and ALLOWED_CLIENT_IP are set from droplet private addresses in doploy.yml and
+# rewritten each time, which is what lets the API connect after the web droplet
+# is rebuilt with a new address.
 #
-# Environment comes from the setup env file doploy writes (mode 0600).
+# Every value below comes from the setup env file doploy writes (mode 0600) and
+# sources before this runs. This script is uploaded verbatim -- doploy does not
+# interpolate script contents -- so the substitution happens in doploy.yml.
 
 set -euo pipefail
 
@@ -33,12 +35,38 @@ echo "postgres ${PG_VERSION}, config in ${CONF_DIR}"
 # does not. Only copy when the target is empty, so a redeploy never clobbers
 # live data.
 
-if [ ! -d "${DATA_DIR}" ]; then
+# PG_VERSION rather than the directory itself is the completeness marker: every
+# valid cluster has it, so its absence means the directory is empty or a
+# previous copy was interrupted. Testing the directory alone would silently skip
+# the move and then start Postgres on a half-copied cluster.
+if [ ! -f "${DATA_DIR}/PG_VERSION" ]; then
   echo "moving the data directory to ${DATA_DIR}"
-  systemctl stop postgresql
 
-  mkdir -p "$(dirname "${DATA_DIR}")"
-  cp -a "/var/lib/postgresql/${PG_VERSION}/main" "${DATA_DIR}"
+  systemctl stop postgresql "postgresql@${PG_VERSION}-main" >/dev/null 2>&1 || true
+
+  # systemctl returns once the unit is stopping, not once it has stopped. The
+  # postmaster can still be shutting down, and transient files such as
+  # postmaster.pid disappear underneath the copy if it starts too early.
+  for _ in $(seq 1 60); do
+    if ! pgrep -u postgres -f 'bin/postgres' >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+
+  if pgrep -u postgres -f 'bin/postgres' >/dev/null 2>&1; then
+    echo "postgres is still running after 60s; refusing to copy a live cluster" >&2
+    exit 1
+  fi
+
+  # Safe because we only get here when PG_VERSION is absent, so there is no
+  # complete cluster at this path to destroy.
+  rm -rf "${DATA_DIR}"
+  mkdir -p "${DATA_DIR}"
+
+  cp -a "/var/lib/postgresql/${PG_VERSION}/main/." "${DATA_DIR}/"
+  rm -f "${DATA_DIR}/postmaster.pid"
+
   chown -R postgres:postgres "${PGDATA_MOUNT}"
   chmod 700 "${DATA_DIR}"
 else
