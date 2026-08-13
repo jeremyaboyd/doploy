@@ -1,5 +1,8 @@
 # doploy
 
+[![CI](https://github.com/jeremyaboyd/doploy/actions/workflows/ci.yml/badge.svg)](https://github.com/jeremyaboyd/doploy/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 `docker compose up`, but it provisions the DigitalOcean droplets first.
 
 You describe your infrastructure and your containers in one compose-style file.
@@ -28,6 +31,12 @@ Set-Alias do doploy
 ```
 
 ## Install
+
+Prebuilt binaries for Linux, macOS, and Windows (amd64 and arm64) are on the
+[releases page](https://github.com/jeremyaboyd/doploy/releases) — download,
+rename to `doploy`, and put it on your PATH.
+
+With Go installed:
 
 ```bash
 go install github.com/jeremyaboyd/doploy/cmd/doploy@latest
