@@ -176,17 +176,21 @@ services:
 	}
 }
 
-func TestComposeFileRejectsEmptyDroplet(t *testing.T) {
+func TestComposeFileIsNilForServicelessDroplet(t *testing.T) {
+	// A droplet with only a setup block -- a native database host -- runs no
+	// containers, so it gets no compose file rather than an error.
 	s, err := Load(writeSpec(t, `
 project: demo
 defaults:
   region: nyc3
   size: s-1vcpu-1gb
-  image: docker-20-04
+  image: ubuntu-24-04-x64
 droplets:
   web:
     default: true
-  idle: {}
+  db:
+    setup:
+      packages: [postgresql]
 services:
   api:
     image: nginx
@@ -195,8 +199,19 @@ services:
 		t.Fatal(err)
 	}
 
-	if _, err := s.ComposeFile("idle"); err == nil {
-		t.Error("a droplet with no services should not produce a compose file")
+	content, err := s.ComposeFile("db")
+	if err != nil {
+		t.Fatalf("a serviceless droplet is legitimate, got error: %v", err)
+	}
+	if content != nil {
+		t.Errorf("expected no compose file for db, got:\n%s", content)
+	}
+
+	if s.HasServices("db") {
+		t.Error("db should report no services")
+	}
+	if !s.HasServices("web") {
+		t.Error("web should report services")
 	}
 }
 

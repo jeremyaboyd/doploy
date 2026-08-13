@@ -91,12 +91,21 @@ echo "mounted $DEVICE at $MOUNT"
 `, shellQuote(device), shellQuote(mountPath), shellQuote(fsType))
 }
 
-// composeUpScript pulls images and brings the stack up.
-func composeUpScript(dir, project string, wait bool, pruneImages bool) string {
+// composeUpScript pulls images, builds any local contexts, and brings the stack
+// up.
+func composeUpScript(dir, project string, wait, pruneImages, hasBuilds bool) string {
 	var b strings.Builder
 	b.WriteString("set -eu\n")
 	fmt.Fprintf(&b, "cd %s\n", shellQuote(dir))
-	fmt.Fprintf(&b, "docker compose -p %s pull\n", shellQuote(project))
+
+	// With build services present, pull would fail on images that do not exist
+	// in any registry yet, so tolerate those failures and let build supply them.
+	if hasBuilds {
+		fmt.Fprintf(&b, "docker compose -p %s pull --ignore-pull-failures || true\n", shellQuote(project))
+		fmt.Fprintf(&b, "docker compose -p %s build\n", shellQuote(project))
+	} else {
+		fmt.Fprintf(&b, "docker compose -p %s pull\n", shellQuote(project))
+	}
 
 	up := fmt.Sprintf("docker compose -p %s up -d --remove-orphans", shellQuote(project))
 	if wait {

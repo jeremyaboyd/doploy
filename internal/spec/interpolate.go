@@ -59,6 +59,13 @@ func Interpolate(s string, lookup Lookup) (string, error) {
 			return ""
 		}
 
+		// Runtime variables name things that do not exist yet -- a droplet's
+		// address is only known once it has been created. Leave the reference
+		// untouched here; ResolveRuntime substitutes it after provisioning.
+		if IsRuntimeVar(name) {
+			return match
+		}
+
 		value, found := lookup(name)
 		switch op {
 		case ":-":

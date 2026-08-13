@@ -57,11 +57,11 @@ droplets:
 `, "nothing to deploy")
 }
 
-func TestValidateRequiresImage(t *testing.T) {
+func TestValidateRequiresImageOrBuild(t *testing.T) {
 	expectLoadError(t, validHeader+`
 services:
   api: {}
-`, "`image` is required")
+`, "needs either `image`")
 }
 
 func TestValidateRequiresRegionSizeImage(t *testing.T) {
@@ -231,7 +231,7 @@ services:
 	}
 	// Both the project name and the missing image should be reported together,
 	// so one run tells the user everything that is wrong.
-	for _, want := range []string{"must be lowercase alphanumeric", "`image` is required"} {
+	for _, want := range []string{"must be lowercase alphanumeric", "needs either `image`"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error missing %q:\n%v", want, err)
 		}

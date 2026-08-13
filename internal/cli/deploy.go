@@ -23,6 +23,7 @@ func newDeployCmd() *cobra.Command {
 		sshKey         string
 		sshPort        int
 		noBootstrap    bool
+		skipSetup      bool
 		wait           bool
 		prune          bool
 		insecure       bool
@@ -65,6 +66,7 @@ reconcile the same deployment.`,
 				SSHKeyPath:      sshKey,
 				SSHPort:         sshPort,
 				Bootstrap:       !noBootstrap,
+				SkipSetup:       skipSetup,
 				Wait:            wait,
 				Prune:           prune,
 				InsecureHostKey: insecure,
@@ -110,6 +112,7 @@ reconcile the same deployment.`,
 	flags.StringVar(&sshKey, "ssh-key", "", "private key to connect with (default: the first key found in ~/.ssh)")
 	flags.IntVar(&sshPort, "ssh-port", 22, "SSH port on the droplets")
 	flags.BoolVar(&noBootstrap, "no-bootstrap", false, "skip installing Docker; assume the image already has it")
+	flags.BoolVar(&skipSetup, "skip-setup", false, "skip host-level setup blocks; deploy containers only")
 	flags.BoolVar(&wait, "wait", false, "wait for container healthchecks to pass before reporting success")
 	flags.BoolVar(&prune, "prune", false, "remove dangling images on the droplet after deploying")
 	flags.BoolVar(&insecure, "insecure-host-key", false, "skip SSH host key verification")

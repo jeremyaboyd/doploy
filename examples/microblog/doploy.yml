@@ -1,0 +1,122 @@
+# A personal microblog across two droplets.
+#
+#   web  -- React frontend + Node API, both in Docker, built on the droplet
+#   db   -- PostgreSQL installed natively (no container), on its own droplet
+#
+# The interesting part is the wiring between them. The API's connection string
+# and Postgres's host-based auth rules both need an address that does not exist
+# until the droplets do, so they are written as ${droplet.NAME.private_ip} and
+# substituted after provisioning, on every deploy.
+#
+#   cp .env.example .env    # fill in the secrets
+#   doploy calculate
+#   doploy deploy --dry-run
+#   doploy deploy
+
+version: "1"
+project: microblog
+
+defaults:
+  region: nyc3
+  size: s-1vcpu-2gb
+  image: ubuntu-24-04-x64
+  ssh_keys:
+    - ${DO_SSH_KEY:?name of an SSH key on your DigitalOcean account}
+  monitoring: true
+
+droplets:
+  # Postgres, installed from apt rather than run as a container.
+  db:
+    volumes:
+      - name: pgdata
+        size_gb: 20 # the cluster's data directory is moved here
+
+    firewall:
+      # No public ingress at all. Postgres binds only to the private interface,
+      # so the only way in is over the VPC or SSH.
+      inbound: []
+      ssh_sources:
+        - ${ADMIN_CIDR:-0.0.0.0/0}
+
+    setup:
+      packages:
+        - postgresql
+        - postgresql-contrib
+
+      # Sourced before each run entry, written 0600 on the droplet. Secrets go
+      # here rather than inline so they stay out of the process list and logs.
+      env:
+        APP_DB_NAME: microblog
+        APP_DB_USER: microblog
+        APP_DB_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+        PGDATA_MOUNT: /mnt/pgdata
+
+        # Resolved after provisioning. DB_LISTEN_IP is this droplet's own
+        # private address; ALLOWED_CLIENT_IP is the web droplet's, and becomes
+        # the pg_hba.conf rule that lets the API in.
+        DB_LISTEN_IP: ${droplet.db.private_ip}
+        ALLOWED_CLIENT_IP: ${droplet.web.private_ip}
+
+      files:
+        - source: db/init.sql
+          dest: /opt/microblog/init.sql
+
+      run:
+        - db/setup-postgres.sh
+
+  # Frontend and backend containers share this droplet.
+  web:
+    default: true
+    size: s-2vcpu-4gb
+
+    # Postgres must be accepting connections before the API starts.
+    depends_on: [db]
+
+    volumes:
+      - name: uploads
+        size_gb: 50 # attachments live here, not in the container
+
+    firewall:
+      inbound: ["80", "443"]
+      ssh_sources:
+        - ${ADMIN_CIDR:-0.0.0.0/0}
+
+services:
+  api:
+    # No registry needed: doploy uploads this directory and builds on the
+    # droplet.
+    build:
+      context: backend
+
+    environment:
+      DATABASE_URL: postgres://microblog:${POSTGRES_PASSWORD}@${droplet.db.private_ip}:5432/microblog
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      UPLOAD_DIR: /var/lib/microblog/uploads
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-256}
+      PORT: "8080"
+
+      # Seeded on first boot; ignored if the account already exists.
+      ADMIN_EMAIL: ${ADMIN_EMAIL:?set ADMIN_EMAIL in .env}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env}
+      ADMIN_DISPLAY_NAME: ${ADMIN_DISPLAY_NAME:-Admin}
+
+    volumes:
+      - /mnt/uploads:/var/lib/microblog/uploads
+
+    healthcheck:
+      test: ["CMD", "node", "healthcheck.js"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+  web:
+    build:
+      context: frontend
+    ports: ["80:80"]
+    depends_on: [api]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5

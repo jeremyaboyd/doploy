@@ -2,10 +2,15 @@ package spec
 
 import (
 	"fmt"
+	"path"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
+
+// buildDirName is the subdirectory of the project's remote directory that holds
+// uploaded build contexts, one per service.
+const buildDirName = "build"
 
 // composeFile is the document doploy writes to each droplet. Field order here
 // controls the order in the generated YAML.
@@ -21,7 +26,8 @@ type emptyMapping struct{}
 func (e *emptyMapping) MarshalYAML() (any, error) { return map[string]any{}, nil }
 
 type composeService struct {
-	Image         string            `yaml:"image"`
+	Image         string            `yaml:"image,omitempty"`
+	Build         *composeBuild     `yaml:"build,omitempty"`
 	ContainerName string            `yaml:"container_name,omitempty"`
 	Restart       string            `yaml:"restart,omitempty"`
 	Entrypoint    []string          `yaml:"entrypoint,omitempty"`
@@ -40,6 +46,14 @@ type composeService struct {
 	Deploy        *Deploy           `yaml:"deploy,omitempty"`
 }
 
+// composeBuild points at the context doploy uploaded, relative to the compose
+// file, so the generated document works if someone runs compose by hand.
+type composeBuild struct {
+	Context    string            `yaml:"context"`
+	Dockerfile string            `yaml:"dockerfile,omitempty"`
+	Args       map[string]string `yaml:"args,omitempty"`
+}
+
 type composeHealth struct {
 	Test        []string `yaml:"test,omitempty"`
 	Interval    string   `yaml:"interval,omitempty"`
@@ -50,10 +64,13 @@ type composeHealth struct {
 
 // ComposeFile renders the docker compose document for one droplet, covering
 // exactly the services scheduled onto it.
+//
+// A droplet with no services returns nil, nil. That is a legitimate shape now
+// that setup blocks exist: a database host runs no containers at all.
 func (s *Spec) ComposeFile(droplet string) ([]byte, error) {
 	services := s.ServicesOn(droplet)
 	if len(services) == 0 {
-		return nil, fmt.Errorf("droplet %q has no services assigned to it", droplet)
+		return nil, nil
 	}
 
 	file := &composeFile{
@@ -78,6 +95,13 @@ func (s *Spec) ComposeFile(droplet string) ([]byte, error) {
 			WorkingDir:  svc.WorkingDir,
 			Privileged:  svc.Privileged,
 			Deploy:      svc.Deploy,
+		}
+		if b := svc.Build; b != nil {
+			cs.Build = &composeBuild{
+				Context:    "./" + path.Join(buildDirName, svc.Name),
+				Dockerfile: b.Dockerfile,
+				Args:       b.Args,
+			}
 		}
 		if hc := svc.Healthcheck; hc != nil {
 			cs.Healthcheck = &composeHealth{
@@ -140,3 +164,9 @@ func (s *Spec) ComposeProjectName() string { return s.Project }
 // RemoteDir is the directory on each droplet holding the generated compose file
 // and environment file.
 func (s *Spec) RemoteDir() string { return "/opt/doploy/" + s.Project }
+
+// RemoteBuildDir is where a service's uploaded build context lands. It matches
+// the relative path written into the compose file.
+func (s *Spec) RemoteBuildDir(service string) string {
+	return path.Join(s.RemoteDir(), buildDirName, service)
+}
