@@ -119,6 +119,17 @@ mode-600 file on the droplet and sources before each command. They are not
 passed on a command line, so they stay out of the process list, and doploy does
 not echo inline setup commands for the same reason.
 
+**Uploads need a chown.** The web droplet has a one-line `setup` block that
+chowns `/mnt/uploads` to uid 1000. A block volume mounts root-owned, and a bind
+mount's ownership comes from the host — it shadows whatever the Dockerfile
+chowned — so without it every upload fails with `EACCES`. doploy mounts volumes
+before setup runs, which is what makes the one-liner sufficient.
+
+**Healthchecks use 127.0.0.1, not localhost.** Inside the container `localhost`
+resolves to `::1` first. nginx listening only on IPv4 means the check gets
+connection refused while the site serves perfectly well — a green site and a
+red deploy. The config now binds `[::]:80` as well.
+
 ## Things this example is not
 
 It is a demonstration of deployment wiring, not a production blog. Before

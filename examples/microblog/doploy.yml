@@ -86,6 +86,15 @@ droplets:
       - name: uploads
         size_gb: 50 # attachments live here, not in the container
 
+    setup:
+      run:
+        # A block volume mounts root-owned, and a bind mount's ownership comes
+        # from the host -- it shadows whatever the Dockerfile chowned. The api
+        # container runs as uid 1000 (node), so without this every upload fails
+        # with EACCES. doploy mounts volumes before setup runs, so the mount
+        # point exists by now.
+        - install -d -o 1000 -g 1000 -m 0755 /mnt/uploads
+
     firewall:
       inbound: ["80", "443"]
       ssh_sources:
