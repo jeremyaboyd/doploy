@@ -216,6 +216,12 @@ func (d *Droplet) applyDefaults(def *Defaults) {
 	if d.User == "" {
 		d.User = def.User
 	}
+	// nil means "not mentioned", which inherits; an explicit `dns: ""` is a
+	// non-nil pointer to an empty string and opts the droplet out.
+	if d.DNS == nil && def.DNS != "" {
+		dns := def.DNS
+		d.DNS = &dns
+	}
 	// Tags accumulate rather than override: spec-wide tags apply everywhere.
 	d.Tags = append(append([]string{}, def.Tags...), d.Tags...)
 }

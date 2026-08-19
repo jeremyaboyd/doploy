@@ -24,7 +24,8 @@ func newDestroyCmd() *cobra.Command {
 		Short: "Tear down everything a deployment created",
 		Long: `Deletes the droplets, firewalls, and tags belonging to a project, found
 through the same ownership tags deploy uses -- so it removes exactly what
-deploy manages, including droplets a stale spec no longer mentions.
+deploy manages, including droplets a stale spec no longer mentions. A records
+pointing at the deleted droplets are removed too; the DNS zones stay.
 
 Volumes are KEPT by default, because they are where the data lives. Pass
 --volumes to delete them too; that is unrecoverable.
@@ -136,6 +137,9 @@ func printDoomed(doomed *provision.Doomed, withVolumes bool) {
 	for _, fw := range doomed.Firewalls {
 		table.Row("firewall", fw.Name, "", "delete")
 	}
+	for _, r := range doomed.Records {
+		table.Row("dns record", r.FQDN(), "A -> "+r.Record.Data, "delete (zone is kept)")
+	}
 	for _, tag := range doomed.Tags {
 		table.Row("tag", tag, "", "delete")
 	}
@@ -143,7 +147,7 @@ func printDoomed(doomed *provision.Doomed, withVolumes bool) {
 }
 
 func countDoomed(doomed *provision.Doomed, withVolumes bool) int {
-	n := len(doomed.Droplets) + len(doomed.Firewalls)
+	n := len(doomed.Droplets) + len(doomed.Firewalls) + len(doomed.Records)
 	if withVolumes {
 		n += len(doomed.Volumes)
 	}

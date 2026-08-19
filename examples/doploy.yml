@@ -32,6 +32,11 @@ droplets:
     default: true
     size: s-2vcpu-4gb
 
+    # doploy ensures the example.com zone exists in DigitalOcean DNS and
+    # points this A record at the droplet's public IP on every deploy. Leave
+    # `dns` out (everywhere) to just use the IP.
+    dns: example.com
+
     firewall:
       inbound: ["80", "443"]
       # Without ssh_sources, port 22 is open to the world. Narrow it.

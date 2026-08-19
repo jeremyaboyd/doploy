@@ -128,6 +128,9 @@ func (p *Provisioner) Reconcile(ctx context.Context) (*Result, error) {
 	if err := p.ensureFirewalls(ctx, result); err != nil {
 		return nil, err
 	}
+	if err := p.ensureDNS(ctx, result); err != nil {
+		return nil, err
+	}
 	return result, nil
 }
 
@@ -323,6 +326,9 @@ func (p *Provisioner) reportPlannedExtras() {
 		}
 		if d.Firewall != nil {
 			ui.Substep("droplet %s: would ensure firewall %q", name, p.firewallName(name))
+		}
+		if dns := d.DNSName(); dns != "" {
+			ui.Substep("droplet %s: would point A record %s at its public IP", name, dns)
 		}
 	}
 }

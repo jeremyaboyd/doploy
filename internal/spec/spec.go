@@ -37,6 +37,10 @@ type Defaults struct {
 	IPv6       *bool    `yaml:"ipv6"`
 	VPCUUID    string   `yaml:"vpc_uuid"`
 	User       string   `yaml:"user"`
+
+	// DNS is the default DNS name for droplets that do not set their own. See
+	// Droplet.DNS.
+	DNS string `yaml:"dns"`
 }
 
 // Droplet is one provisioned virtual machine.
@@ -58,6 +62,12 @@ type Droplet struct {
 	// User is the SSH login. Defaults to root, which is what DigitalOcean's
 	// base images ship with.
 	User string `yaml:"user"`
+
+	// DNS is the domain name pointed at this droplet's public IP: doploy
+	// ensures the zone exists and upserts an A record on every deploy.
+	// Unset inherits defaults.dns; an explicit empty string opts out of that
+	// inheritance, which is why this is a pointer.
+	DNS *string `yaml:"dns"`
 
 	// Default marks the droplet that services fall back to when they do not
 	// name one and more than one droplet exists.
@@ -258,6 +268,15 @@ func (v *Volume) MountPathOrDefault() string {
 		return v.MountPath
 	}
 	return "/mnt/" + v.Name
+}
+
+// DNSName returns the DNS name pointed at this droplet, already resolved
+// against defaults. Empty means no DNS is managed for it.
+func (d *Droplet) DNSName() string {
+	if d.DNS == nil {
+		return ""
+	}
+	return *d.DNS
 }
 
 // UserOrDefault returns the SSH login for a droplet.

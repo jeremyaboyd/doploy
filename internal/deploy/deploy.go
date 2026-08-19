@@ -140,6 +140,9 @@ func runtimeVarsFrom(result *provision.Result) spec.RuntimeVars {
 		if state.PublicIP != "" {
 			vars.Set(state.Name, spec.FieldPublicIP, state.PublicIP)
 		}
+		if dns := state.Spec.DNSName(); dns != "" {
+			vars.Set(state.Name, spec.FieldDNS, dns)
+		}
 		vars.Set(state.Name, spec.FieldName, state.Name)
 	}
 	return vars
