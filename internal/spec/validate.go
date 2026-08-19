@@ -18,6 +18,10 @@ var namePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 // optional /tcp or /udp suffix and optional ranges.
 var portPattern = regexp.MustCompile(`^(\d[\d.]*:)?(\d+(-\d+)?:)?\d+(-\d+)?(/(tcp|udp))?$`)
 
+// dnsLabelPattern is one label of a DNS name. Lowercase only, matching how the
+// DigitalOcean API stores names.
+var dnsLabelPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
 // Errors collects every validation failure so one run reports them all rather
 // than making the user fix them one at a time.
 type Errors []string
@@ -179,7 +183,50 @@ func (s *Spec) validateDroplets() Errors {
 			}
 		}
 	}
+
+	errs = append(errs, s.validateDNSNames()...)
 	return errs
+}
+
+// validateDNSNames checks the resolved DNS name of every droplet and rejects
+// two droplets claiming the same name: an A record points at one address, so a
+// collision means one droplet would silently win.
+func (s *Spec) validateDNSNames() Errors {
+	var errs Errors
+	claimed := map[string]string{}
+
+	for _, name := range s.DropletNames() {
+		dns := s.Droplets[name].DNSName()
+		if dns == "" {
+			continue
+		}
+		if err := validateDNSName(dns); err != nil {
+			errs = append(errs, fmt.Sprintf("droplet %q: dns %v", name, err))
+			continue
+		}
+		if other, dup := claimed[dns]; dup {
+			errs = append(errs, fmt.Sprintf("droplets %q and %q both resolve to dns name %q; set `dns:` explicitly on one, or `dns: \"\"` to opt it out of the default", other, name, dns))
+		}
+		claimed[dns] = name
+	}
+	return errs
+}
+
+// validateDNSName checks a full domain name such as "api.example.com".
+func validateDNSName(name string) error {
+	if len(name) > 253 {
+		return fmt.Errorf("%q is longer than 253 characters", name)
+	}
+	labels := strings.Split(name, ".")
+	if len(labels) < 2 {
+		return fmt.Errorf("%q needs at least two labels (a bare hostname has no zone to put the record in)", name)
+	}
+	for _, label := range labels {
+		if !dnsLabelPattern.MatchString(label) {
+			return fmt.Errorf("%q is not a valid domain name (lowercase letters, digits, and dashes only)", name)
+		}
+	}
+	return nil
 }
 
 func (s *Spec) validateServices() Errors {

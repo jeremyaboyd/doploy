@@ -19,12 +19,22 @@ type Doomed struct {
 	Droplets  []godo.Droplet  `json:"droplets"`
 	Volumes   []godo.Volume   `json:"volumes"`
 	Firewalls []godo.Firewall `json:"firewalls"`
+	Records   []DoomedRecord  `json:"dns_records"`
 	Tags      []string        `json:"tags"`
 }
 
+// DoomedRecord is a DNS record about to point at a deleted droplet.
+type DoomedRecord struct {
+	Zone   string            `json:"zone"`
+	Record godo.DomainRecord `json:"record"`
+}
+
+// FQDN is the record's full name, for display.
+func (r *DoomedRecord) FQDN() string { return fqdnOf(r.Zone, r.Record.Name) }
+
 // Empty reports whether there is nothing to delete.
 func (d *Doomed) Empty() bool {
-	return len(d.Droplets) == 0 && len(d.Volumes) == 0 && len(d.Firewalls) == 0
+	return len(d.Droplets) == 0 && len(d.Volumes) == 0 && len(d.Firewalls) == 0 && len(d.Records) == 0
 }
 
 // Destroyer tears down a project's resources.
@@ -79,6 +89,12 @@ func (d *Destroyer) Plan(ctx context.Context) (*Doomed, error) {
 		}
 	}
 
+	records, err := d.findRecords(ctx, doomed.Droplets)
+	if err != nil {
+		return nil, err
+	}
+	doomed.Records = records
+
 	// The project tag plus one ownership tag per droplet. The generic "doploy"
 	// marker is shared by every project and is left alone.
 	doomed.Tags = append(doomed.Tags, tag)
@@ -91,9 +107,60 @@ func (d *Destroyer) Plan(ctx context.Context) (*Doomed, error) {
 	return doomed, nil
 }
 
-// Destroy deletes what Plan found: droplets first (which detaches their
-// volumes), then volumes unless kept, then firewalls, then the project's tags.
+// findRecords scans the account's DNS zones for A records pointing at the
+// doomed droplets' public addresses.
+//
+// DNS records cannot carry tags, so unlike everything else destroy discovers
+// they are matched by where they point: a record aimed at a droplet being
+// deleted is about to dangle regardless of who created it. Zones themselves
+// are never deleted -- they routinely hold MX and other records doploy did not
+// create.
+func (d *Destroyer) findRecords(ctx context.Context, droplets []godo.Droplet) ([]DoomedRecord, error) {
+	ips := map[string]bool{}
+	for _, droplet := range droplets {
+		if ip, err := droplet.PublicIPv4(); err == nil && ip != "" {
+			ips[ip] = true
+		}
+	}
+	if len(ips) == 0 {
+		return nil, nil
+	}
+
+	domains, err := doclient.Paginate(func(opt *godo.ListOptions) ([]godo.Domain, *godo.Response, error) {
+		return d.Client.Domains.List(ctx, opt)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing domains: %w", err)
+	}
+
+	var doomed []DoomedRecord
+	for _, domain := range domains {
+		records, err := doclient.Paginate(func(opt *godo.ListOptions) ([]godo.DomainRecord, *godo.Response, error) {
+			return d.Client.Domains.RecordsByType(ctx, domain.Name, "A", opt)
+		})
+		if err != nil {
+			return nil, fmt.Errorf("listing records in zone %s: %w", domain.Name, err)
+		}
+		for _, r := range records {
+			if ips[r.Data] {
+				doomed = append(doomed, DoomedRecord{Zone: domain.Name, Record: r})
+			}
+		}
+	}
+	return doomed, nil
+}
+
+// Destroy deletes what Plan found: DNS records first (stop pointing names at
+// hosts about to die), then droplets (which detaches their volumes), then
+// volumes unless kept, then firewalls, then the project's tags.
 func (d *Destroyer) Destroy(ctx context.Context, doomed *Doomed, keepVolumes bool) error {
+	for _, r := range doomed.Records {
+		ui.Substep("deleting A record %s -> %s", r.FQDN(), r.Record.Data)
+		if _, err := d.Client.Domains.DeleteRecord(ctx, r.Zone, r.Record.ID); err != nil {
+			return fmt.Errorf("deleting A record %s: %w", r.FQDN(), err)
+		}
+	}
+
 	for _, droplet := range doomed.Droplets {
 		ui.Substep("deleting droplet %s (%d)", droplet.Name, droplet.ID)
 		if _, err := d.Client.Droplets.Delete(ctx, droplet.ID); err != nil {

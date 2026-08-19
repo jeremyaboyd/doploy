@@ -75,6 +75,13 @@ reconcile the same deployment.`,
 				ConnectTimeout:  connectTimeout,
 			}
 
+			// --yes covers this prompt too: nil means overwrite without asking.
+			if !assumeYes {
+				opts.ConfirmDNSOverwrite = func(fqdn, current, target string) (bool, error) {
+					return confirm(fmt.Sprintf("Point %s at %s instead?", fqdn, target))
+				}
+			}
+
 			if insecure {
 				ui.Warn("--insecure-host-key disables host key verification for this run")
 			}

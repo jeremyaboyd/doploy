@@ -20,6 +20,7 @@ const (
 	FieldPrivateIP = "private_ip"
 	FieldPublicIP  = "public_ip"
 	FieldName      = "name"
+	FieldDNS       = "dns"
 )
 
 // IsRuntimeVar reports whether a variable name is resolved after provisioning.
@@ -230,8 +231,8 @@ func describeBadRef(ref string, vars RuntimeVars) string {
 
 	for key := range vars {
 		if refDroplet, _, ok := ParseRuntimeRef(key); ok && refDroplet == droplet {
-			return fmt.Sprintf("droplet %q has no %s; valid fields are %s, %s, and %s",
-				droplet, field, FieldPrivateIP, FieldPublicIP, FieldName)
+			return fmt.Sprintf("droplet %q has no %s; valid fields are %s, %s, %s, and %s",
+				droplet, field, FieldPrivateIP, FieldPublicIP, FieldName, FieldDNS)
 		}
 	}
 	return fmt.Sprintf("no droplet named %q was provisioned", droplet)
@@ -242,7 +243,7 @@ func describeBadRef(ref string, vars RuntimeVars) string {
 // time so a typo fails before anything is created.
 func (s *Spec) ValidateRuntimeReferences() Errors {
 	var errs Errors
-	validFields := map[string]bool{FieldPrivateIP: true, FieldPublicIP: true, FieldName: true}
+	validFields := map[string]bool{FieldPrivateIP: true, FieldPublicIP: true, FieldName: true, FieldDNS: true}
 
 	for _, ref := range s.RuntimeReferences() {
 		droplet, field, ok := ParseRuntimeRef(ref)
@@ -250,12 +251,19 @@ func (s *Spec) ValidateRuntimeReferences() Errors {
 			errs = append(errs, fmt.Sprintf("%s is not a valid reference; expected ${droplet.NAME.private_ip}", ref))
 			continue
 		}
-		if _, defined := s.Droplets[droplet]; !defined {
+		target, defined := s.Droplets[droplet]
+		if !defined {
 			errs = append(errs, fmt.Sprintf("%s refers to droplet %q, which is not defined", ref, droplet))
 		}
 		if !validFields[field] {
-			errs = append(errs, fmt.Sprintf("%s: unknown field %q; use %s, %s, or %s",
-				ref, field, FieldPrivateIP, FieldPublicIP, FieldName))
+			errs = append(errs, fmt.Sprintf("%s: unknown field %q; use %s, %s, %s, or %s",
+				ref, field, FieldPrivateIP, FieldPublicIP, FieldName, FieldDNS))
+		}
+		// The dns field only has a value when the droplet actually gets one, so
+		// a reference to a dns-less droplet is caught here rather than after
+		// provisioning.
+		if field == FieldDNS && defined && target.DNSName() == "" {
+			errs = append(errs, fmt.Sprintf("%s: droplet %q has no `dns:` set and no `defaults.dns` to inherit", ref, droplet))
 		}
 	}
 	return errs

@@ -93,6 +93,7 @@ droplets:
   web:
     default: true       # services that do not name a droplet land here
     size: s-2vcpu-4gb
+    dns: example.com    # A record pointed at this droplet on every deploy
     firewall:
       inbound: ["80", "443"]
       ssh_sources: ["203.0.113.4/32"]   # lock SSH to your IP
@@ -173,6 +174,56 @@ projects can both call a volume `data`.
 doploy never resizes or deletes a volume. Shrinking is impossible and deleting
 destroys data; both are left to a deliberate manual action.
 
+### DNS
+
+A droplet can carry a `dns:` name, and doploy points it at the droplet's public
+IP on every deploy — creating the zone in DigitalOcean DNS if the account does
+not have one, then upserting the A record:
+
+```yaml
+defaults:
+  dns: example.com        # inherited by droplets that do not set their own
+
+droplets:
+  web:
+    default: true         # gets example.com (the zone apex)
+  db:
+    dns: db.example.com   # its own record in the same zone
+  worker:
+    dns: ""               # explicitly no DNS: reached by IP only
+```
+
+The rules, in order:
+
+- A droplet's `dns:` is the full domain name to point at it. Unset inherits
+  `defaults.dns`; if that is unset too, the droplet gets no DNS and is reached
+  by IP. An explicit `dns: ""` opts one droplet out of the inherited default.
+- Two droplets resolving to the same name is a validation error — an A record
+  points one way, so doploy refuses to guess which droplet wins.
+- The record lands in the account's existing zone that matches the name
+  (longest match, so a delegated `staging.example.com` zone beats
+  `example.com`). With no matching zone, one is created: `defaults.dns` when
+  the name falls under it, otherwise the last two labels of the name. Names
+  under multi-part public suffixes (`example.co.uk`) should set `defaults.dns`
+  so the zone boundary is explicit.
+- Records are converged, not just created: a record pointing at a stale
+  address is rewritten, so rebuilding a droplet and redeploying heals the DNS
+  too. A record that is already correct is left alone.
+- A record that currently points somewhere *outside* the project — an address
+  that is not one of this deployment's droplets — may belong to something else
+  entirely, so doploy warns and asks before overwriting it. Answering no
+  leaves the record alone and continues the deploy; `--yes` overwrites
+  without asking. A record moving between this project's own droplets never
+  prompts.
+
+`doploy list dns` shows the zones on the account; `doploy list dns example.com`
+shows every record in that zone.
+
+doploy manages exactly one A record per droplet. It never touches MX, TXT,
+CNAME, or records it did not make, and it never deletes a zone. Registering
+the domain and pointing its nameservers at DigitalOcean
+(`ns1-3.digitalocean.com`) remains yours to do.
+
 ### Host setup, for things that should not be containers
 
 A droplet can run host-level provisioning before any container starts. This is
@@ -218,7 +269,8 @@ services:
       DATABASE_URL: postgres://app:pw@${droplet.db.private_ip}:5432/app
 ```
 
-Available fields are `private_ip`, `public_ip`, and `name`. These references
+Available fields are `private_ip`, `public_ip`, `name`, and `dns` (the DNS
+name pointed at the droplet, for droplets that have one). These references
 survive the initial parse untouched. doploy provisions everything first, then
 substitutes real addresses, then renders compose files and runs setup — so they
 are correct on the first deploy and *rewritten* on every subsequent one.
@@ -276,6 +328,7 @@ doploy list oses                  # bootable distribution images
 doploy list images                # 1-Click marketplace images
 doploy list sizes [region]        # droplet sizes, cheapest first
 doploy list regions               # deployment regions
+doploy list dns [domain]          # DNS zones, or the records in one zone
 
 doploy calculate                  # estimated monthly cost of the spec
 doploy deploy                     # provision, then deploy
@@ -313,6 +366,11 @@ Discovery goes through the same ownership tags deploy uses, so destroy removes
 exactly what deploy manages — including droplets a stale spec no longer
 mentions. It shows the full list and asks before deleting anything (`--yes` to
 skip, for scripts).
+
+DNS records cannot carry tags, so they are found by where they point: any A
+record aimed at a doomed droplet's public IP is listed and deleted — it would
+dangle otherwise. The zones themselves are never deleted, since they routinely
+hold MX and other records doploy did not create.
 
 **Volumes are kept by default.** They are where the data lives, and recreating
 the droplets later reattaches them intact. Deleting data requires saying
@@ -360,7 +418,8 @@ means rebuilding; both should be your decision, not a side effect of a deploy.
 Per droplet, in order:
 
 1. Reconcile the droplet — reuse if tagged, create and wait for `active` if not.
-2. Create and attach block volumes; create or update the cloud firewall.
+2. Create and attach block volumes; create or update the cloud firewall; ensure
+   the DNS zone and A record for droplets that declare `dns:`.
 3. SSH in, retrying until `sshd` answers (a new droplet reports `active` before
    it accepts connections).
 4. Install Docker if missing (skip with `--no-bootstrap`).
@@ -406,7 +465,8 @@ be missed:
   build on your machine or push to a registry, so a large context is uploaded
   and compiled once per host. For anything beyond a small app, build in CI and
   reference the pushed image instead.
-- **Load balancers, managed databases, DNS records, reserved IPs.**
+- **Load balancers, managed databases, reserved IPs.** DNS is limited to one A
+  record per droplet; other record types stay in the console.
 - **Rollback.** A failed deploy leaves the previous containers running if the
   pull fails, but there is no version history to roll back to.
 
