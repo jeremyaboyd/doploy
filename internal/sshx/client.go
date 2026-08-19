@@ -24,7 +24,7 @@ type DialOptions struct {
 	Host    string
 	Port    int
 	User    string
-	Signer  ssh.Signer
+	Signers []ssh.Signer
 	HostKey ssh.HostKeyCallback
 	Timeout time.Duration // per-attempt dial timeout
 	MaxWait time.Duration // total time to keep retrying
@@ -49,7 +49,7 @@ func Dial(ctx context.Context, opts DialOptions) (*Client, error) {
 
 	cfg := &ssh.ClientConfig{
 		User:            opts.User,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(opts.Signer)},
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(opts.Signers...)},
 		HostKeyCallback: opts.HostKey,
 		Timeout:         opts.Timeout,
 	}

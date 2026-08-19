@@ -329,6 +329,10 @@ doploy list images                # 1-Click marketplace images
 doploy list sizes [region]        # droplet sizes, cheapest first
 doploy list regions               # deployment regions
 doploy list dns [domain]          # DNS zones, or the records in one zone
+doploy list ssh                   # SSH keys on the account, by name
+doploy list ssh local             # doploy's own keys and trusted droplet hosts
+
+doploy add ssh [name]             # generate a key and upload it to the account
 
 doploy calculate                  # estimated monthly cost of the spec
 doploy deploy                     # provision, then deploy
@@ -352,6 +356,31 @@ doploy deploy --yes                     # skip the confirmation prompt
 The first run for a spec shows what it will create and what it will cost, then
 asks. Redeploys onto existing droplets add no recurring charge, so they proceed
 without a prompt.
+
+### add ssh
+
+```bash
+doploy add ssh mykey     # named
+doploy add ssh           # named doploy-<random>
+```
+
+Generates an ed25519 keypair, keeps the private key in doploy's key store
+(`keys/` next to the credentials file), and uploads the public half to the
+DigitalOcean account under the given name. The private key never leaves the
+machine.
+
+Keys in the store are offered automatically when deploying, so after creating
+one, a spec only needs to reference it:
+
+```yaml
+defaults:
+  ssh_keys: [mykey]
+```
+
+and `doploy deploy` works with no `--ssh-key` flag. `doploy list ssh` shows the
+account's keys and marks the ones whose private half is in the local store;
+`doploy list ssh local` shows the store itself plus the droplet host keys
+doploy has recorded in its `known_hosts`.
 
 ### destroy
 

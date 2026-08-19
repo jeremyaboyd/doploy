@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/jeremyaboyd/doploy/internal/ui"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 )
@@ -18,17 +19,52 @@ import (
 // newest key type first.
 var defaultKeyNames = []string{"id_ed25519", "id_ecdsa", "id_rsa"}
 
-// LoadSigner loads a private key, prompting for a passphrase if the key is
-// encrypted. An empty path searches the standard locations.
-func LoadSigner(path string) (ssh.Signer, error) {
-	if path == "" {
-		found, err := discoverKey()
+// LoadSigners collects the private keys to offer a droplet, in order.
+//
+// An explicit path is that key and nothing else. Otherwise every key in
+// doploy's own store is offered first (they exist precisely to be found
+// automatically), then the first standard key under ~/.ssh. SSH tries the
+// candidates in order until one is accepted, so extra keys cost nothing.
+func LoadSigners(path string) ([]ssh.Signer, error) {
+	if path != "" {
+		signer, err := loadSignerFile(path)
 		if err != nil {
 			return nil, err
 		}
-		path = found
+		return []ssh.Signer{signer}, nil
 	}
 
+	signers, err := StoredSigners()
+	if err != nil {
+		return nil, err
+	}
+
+	if found, err := discoverKey(); err == nil {
+		signer, err := loadSignerFile(found)
+		switch {
+		case err == nil:
+			signers = append(signers, signer)
+		case len(signers) > 0:
+			// A store key can already authenticate, so a home key that needs a
+			// passphrase (or fails to parse) should not block the deploy.
+			ui.Warn("skipping %s: %v", found, err)
+		default:
+			return nil, err
+		}
+	}
+
+	if len(signers) == 0 {
+		home, _ := os.UserHomeDir()
+		keysDir, _ := KeysDir()
+		return nil, fmt.Errorf("no SSH private key found in %s (looked for %s) and none in doploy's key store (%s); run `doploy add ssh` to create one, or pass --ssh-key",
+			filepath.Join(home, ".ssh"), strings.Join(defaultKeyNames, ", "), keysDir)
+	}
+	return signers, nil
+}
+
+// loadSignerFile loads one private key, prompting for a passphrase if the key
+// is encrypted.
+func loadSignerFile(path string) (ssh.Signer, error) {
 	data, err := os.ReadFile(expandHome(path))
 	if err != nil {
 		return nil, fmt.Errorf("reading SSH key %s: %w", path, err)
