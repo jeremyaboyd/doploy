@@ -38,10 +38,16 @@ jobs:
           done
           (cd dist && sha256sum * > checksums.txt)
 
+      # A release made through the GitHub UI creates the tag and the release
+      # together, so by the time this job runs the release may already exist.
+      # Create it only if missing, then attach the assets either way.
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes
+          fi
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber
