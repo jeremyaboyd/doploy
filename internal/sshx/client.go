@@ -1,8 +1,8 @@
 package sshx
 
 import (
+	"bytes"
 	"context"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
@@ -133,29 +133,46 @@ func (c *Client) Stream(cmd string, w io.Writer) error {
 	return nil
 }
 
+// runWithStdin executes a command with r streamed to its stdin, returning the
+// combined output on failure the same way Run does.
+func (c *Client) runWithStdin(cmd string, r io.Reader) (string, error) {
+	session, err := c.conn.NewSession()
+	if err != nil {
+		return "", fmt.Errorf("opening session: %w", err)
+	}
+	defer session.Close()
+
+	session.Stdin = r
+	out, err := session.CombinedOutput(cmd)
+	if err != nil {
+		return string(out), fmt.Errorf("remote command failed: %w\n%s", err, strings.TrimSpace(string(out)))
+	}
+	return string(out), nil
+}
+
 // WriteFile uploads content to a remote path with the given mode.
 //
-// The payload is base64-encoded and decoded on the far side, which keeps
-// arbitrary bytes safe through a shell without needing a second SFTP channel.
+// The payload is streamed over the session's stdin rather than embedded in the
+// command line: a single shell argument is capped at MAX_ARG_STRLEN (128 KiB
+// on Linux), which a base64-embedded payload hits at ~96 KiB of content.
 // The write goes to a temporary file and is renamed into place so a failure
 // never leaves a half-written compose file behind.
 func (c *Client) WriteFile(remotePath string, content []byte, mode string) error {
 	if mode == "" {
 		mode = "0644"
 	}
-	encoded := base64.StdEncoding.EncodeToString(content)
 	dir := path.Dir(remotePath)
 	tmp := remotePath + ".doploy.tmp"
 
 	script := strings.Join([]string{
 		"set -eu",
 		"mkdir -p " + shellQuote(dir),
-		fmt.Sprintf("printf '%%s' %s | base64 -d > %s", shellQuote(encoded), shellQuote(tmp)),
+		"cat > " + shellQuote(tmp),
 		fmt.Sprintf("chmod %s %s", mode, shellQuote(tmp)),
 		fmt.Sprintf("mv %s %s", shellQuote(tmp), shellQuote(remotePath)),
 	}, "\n")
 
-	if _, err := c.Run(script); err != nil {
+	if _, err := c.runWithStdin(script, bytes.NewReader(content)); err != nil {
 		return fmt.Errorf("writing %s: %w", remotePath, err)
 	}
 	return nil
@@ -163,23 +180,24 @@ func (c *Client) WriteFile(remotePath string, content []byte, mode string) error
 
 // WriteArchive uploads a gzipped tar and extracts it into remoteDir.
 //
-// The directory is replaced rather than merged: a file deleted locally must not
-// survive on the droplet and end up in the next image build.
+// The archive is streamed over the session's stdin (see WriteFile for why the
+// command line cannot carry it). The directory is replaced rather than merged:
+// a file deleted locally must not survive on the droplet and end up in the
+// next image build.
 func (c *Client) WriteArchive(remoteDir string, tarGz []byte) error {
-	encoded := base64.StdEncoding.EncodeToString(tarGz)
 	staging := remoteDir + ".doploy.new"
 
 	script := strings.Join([]string{
 		"set -eu",
 		"rm -rf " + shellQuote(staging),
 		"mkdir -p " + shellQuote(staging),
-		fmt.Sprintf("printf '%%s' %s | base64 -d | tar xzf - -C %s", shellQuote(encoded), shellQuote(staging)),
+		"tar xzf - -C " + shellQuote(staging),
 		"rm -rf " + shellQuote(remoteDir),
 		"mkdir -p " + shellQuote(path.Dir(remoteDir)),
 		fmt.Sprintf("mv %s %s", shellQuote(staging), shellQuote(remoteDir)),
 	}, "\n")
 
-	if _, err := c.Run(script); err != nil {
+	if _, err := c.runWithStdin(script, bytes.NewReader(tarGz)); err != nil {
 		return fmt.Errorf("uploading archive to %s: %w", remoteDir, err)
 	}
 	return nil
