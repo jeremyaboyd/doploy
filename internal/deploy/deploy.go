@@ -46,6 +46,10 @@ type Options struct {
 
 	// ConnectTimeout bounds how long to wait for sshd on a new droplet.
 	ConnectTimeout time.Duration
+
+	// ConfirmDNSOverwrite is asked before an A record pointing outside the
+	// project is rewritten. Nil proceeds without asking.
+	ConfirmDNSOverwrite func(fqdn, current, target string) (bool, error)
 }
 
 // Deployer runs a deployment.
@@ -79,7 +83,12 @@ func (d *Deployer) Run(ctx context.Context) ([]Summary, error) {
 	}
 
 	ui.Step("Provisioning %s", plural(len(targets), "droplet"))
-	p := &provision.Provisioner{Client: d.Client, Spec: d.Spec, DryRun: d.Opts.DryRun}
+	p := &provision.Provisioner{
+		Client:              d.Client,
+		Spec:                d.Spec,
+		DryRun:              d.Opts.DryRun,
+		ConfirmDNSOverwrite: d.Opts.ConfirmDNSOverwrite,
+	}
 	result, err := p.Reconcile(ctx)
 	if err != nil {
 		return nil, err

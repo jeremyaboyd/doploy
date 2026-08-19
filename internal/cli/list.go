@@ -24,8 +24,90 @@ func newListCmd() *cobra.Command {
 		newListImagesCmd(),
 		newListSizesCmd(),
 		newListRegionsCmd(),
+		newListDNSCmd(),
 	)
 	return cmd
+}
+
+func newListDNSCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:     "dns [domain]",
+		Aliases: []string{"domains", "zones"},
+		Short:   "List DNS zones, or the records in one zone",
+		Long: `Without an argument, lists the DNS zones on the account. With a domain,
+lists every record in that zone -- including ones doploy did not create, since
+a zone routinely carries MX, TXT, and other records alongside the A records
+doploy manages.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateOutput(); err != nil {
+				return err
+			}
+			client, err := apiClient()
+			if err != nil {
+				return err
+			}
+			ctx := cmd.Context()
+
+			if len(args) == 0 {
+				return listZones(ctx, client)
+			}
+			return listZoneRecords(ctx, client, args[0])
+		},
+	}
+}
+
+func listZones(ctx context.Context, client *godo.Client) error {
+	domains, err := doclient.Paginate(func(opt *godo.ListOptions) ([]godo.Domain, *godo.Response, error) {
+		return client.Domains.List(ctx, opt)
+	})
+	if err != nil {
+		return fmt.Errorf("listing domains: %w", err)
+	}
+
+	if jsonOutput() {
+		return ui.JSON(domains)
+	}
+
+	sort.Slice(domains, func(i, j int) bool { return domains[i].Name < domains[j].Name })
+
+	table := ui.NewTable("ZONE", "TTL")
+	for _, d := range domains {
+		table.Row(d.Name, d.TTL)
+	}
+	table.Print()
+
+	if table.Len() == 0 {
+		fmt.Println("\nNo DNS zones on this account.")
+	}
+	return nil
+}
+
+func listZoneRecords(ctx context.Context, client *godo.Client, zone string) error {
+	records, err := doclient.Paginate(func(opt *godo.ListOptions) ([]godo.DomainRecord, *godo.Response, error) {
+		return client.Domains.Records(ctx, zone, opt)
+	})
+	if err != nil {
+		return fmt.Errorf("listing records in zone %s: %w", zone, err)
+	}
+
+	if jsonOutput() {
+		return ui.JSON(records)
+	}
+
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].Type != records[j].Type {
+			return records[i].Type < records[j].Type
+		}
+		return records[i].Name < records[j].Name
+	})
+
+	table := ui.NewTable("TYPE", "NAME", "DATA", "TTL")
+	for _, r := range records {
+		table.Row(r.Type, r.Name, r.Data, r.TTL)
+	}
+	table.Print()
+	return nil
 }
 
 func newListDropletsCmd() *cobra.Command {

@@ -28,6 +28,12 @@ type Provisioner struct {
 
 	// DryRun reports what would change without creating anything.
 	DryRun bool
+
+	// ConfirmDNSOverwrite is asked before rewriting an A record that currently
+	// points somewhere outside this project -- that record may belong to
+	// something else entirely. Answering no skips the record and continues.
+	// Nil proceeds without asking (the --yes path).
+	ConfirmDNSOverwrite func(fqdn, current, target string) (bool, error)
 }
 
 // DropletState is the outcome of reconciling one droplet from the spec.

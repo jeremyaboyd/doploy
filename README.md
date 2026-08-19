@@ -209,6 +209,15 @@ The rules, in order:
 - Records are converged, not just created: a record pointing at a stale
   address is rewritten, so rebuilding a droplet and redeploying heals the DNS
   too. A record that is already correct is left alone.
+- A record that currently points somewhere *outside* the project — an address
+  that is not one of this deployment's droplets — may belong to something else
+  entirely, so doploy warns and asks before overwriting it. Answering no
+  leaves the record alone and continues the deploy; `--yes` overwrites
+  without asking. A record moving between this project's own droplets never
+  prompts.
+
+`doploy list dns` shows the zones on the account; `doploy list dns example.com`
+shows every record in that zone.
 
 doploy manages exactly one A record per droplet. It never touches MX, TXT,
 CNAME, or records it did not make, and it never deletes a zone. Registering
@@ -319,6 +328,7 @@ doploy list oses                  # bootable distribution images
 doploy list images                # 1-Click marketplace images
 doploy list sizes [region]        # droplet sizes, cheapest first
 doploy list regions               # deployment regions
+doploy list dns [domain]          # DNS zones, or the records in one zone
 
 doploy calculate                  # estimated monthly cost of the spec
 doploy deploy                     # provision, then deploy

@@ -42,6 +42,15 @@ func (p *Provisioner) ensureDNS(ctx context.Context, result *Result) error {
 		zones[i] = d.Name
 	}
 
+	// Addresses belonging to this project's droplets: a record moving between
+	// them is an intra-project change and needs no confirmation.
+	projectIPs := map[string]bool{}
+	for _, state := range result.Droplets {
+		if state.PublicIP != "" {
+			projectIPs[state.PublicIP] = true
+		}
+	}
+
 	for _, state := range targets {
 		fqdn := state.Spec.DNSName()
 		if state.PublicIP == "" {
@@ -58,7 +67,7 @@ func (p *Provisioner) ensureDNS(ctx context.Context, result *Result) error {
 			zones = append(zones, zone)
 		}
 
-		if err := p.upsertARecord(ctx, zone, record, fqdn, state); err != nil {
+		if err := p.upsertARecord(ctx, zone, record, fqdn, state, projectIPs); err != nil {
 			return fmt.Errorf("droplet %q dns: %w", state.Name, err)
 		}
 	}
@@ -67,7 +76,7 @@ func (p *Provisioner) ensureDNS(ctx context.Context, result *Result) error {
 
 // upsertARecord makes the A record for `record` in `zone` point at the
 // droplet's public IP.
-func (p *Provisioner) upsertARecord(ctx context.Context, zone, record, fqdn string, state *DropletState) error {
+func (p *Provisioner) upsertARecord(ctx context.Context, zone, record, fqdn string, state *DropletState, projectIPs map[string]bool) error {
 	records, err := doclient.Paginate(func(opt *godo.ListOptions) ([]godo.DomainRecord, *godo.Response, error) {
 		return p.Client.Domains.Records(ctx, zone, opt)
 	})
@@ -102,6 +111,21 @@ func (p *Provisioner) upsertARecord(ctx context.Context, zone, record, fqdn stri
 	if existing[0].Data == state.PublicIP {
 		ui.Substep("dns: A record %s already points at %s", fqdn, state.PublicIP)
 		return nil
+	}
+
+	// A record pointing at another droplet of this project is just the name
+	// moving between hosts. One pointing anywhere else may belong to something
+	// doploy knows nothing about, so rewriting it needs a human's say-so.
+	if !projectIPs[existing[0].Data] && p.ConfirmDNSOverwrite != nil {
+		ui.Warn("dns: A record %s points at %s, which is not part of this project", fqdn, existing[0].Data)
+		proceed, err := p.ConfirmDNSOverwrite(fqdn, existing[0].Data, state.PublicIP)
+		if err != nil {
+			return err
+		}
+		if !proceed {
+			ui.Warn("dns: leaving %s pointing at %s", fqdn, existing[0].Data)
+			return nil
+		}
 	}
 
 	ui.Substep("dns: updating A record %s: %s -> %s", fqdn, existing[0].Data, state.PublicIP)
