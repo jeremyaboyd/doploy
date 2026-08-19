@@ -109,7 +109,7 @@ func (d *Deployer) Run(ctx context.Context) ([]Summary, error) {
 		ui.Substep("resolved %s", strings.Join(refs, ", "))
 	}
 
-	signer, err := sshx.LoadSigner(d.Opts.SSHKeyPath)
+	signers, err := sshx.LoadSigners(d.Opts.SSHKeyPath)
 	if err != nil {
 		return nil, err
 	}
@@ -125,7 +125,7 @@ func (d *Deployer) Run(ctx context.Context) ([]Summary, error) {
 			return summaries, fmt.Errorf("droplet %q was not provisioned", name)
 		}
 
-		summary, err := d.deployDroplet(ctx, state, signer, hostKey)
+		summary, err := d.deployDroplet(ctx, state, signers, hostKey)
 		if err != nil {
 			return summaries, fmt.Errorf("deploying to droplet %q: %w", name, err)
 		}
@@ -158,7 +158,7 @@ func runtimeVarsFrom(result *provision.Result) spec.RuntimeVars {
 }
 
 // deployDroplet connects to one host, prepares it, and brings its services up.
-func (d *Deployer) deployDroplet(ctx context.Context, state *provision.DropletState, signer ssh.Signer, hostKey ssh.HostKeyCallback) (Summary, error) {
+func (d *Deployer) deployDroplet(ctx context.Context, state *provision.DropletState, signers []ssh.Signer, hostKey ssh.HostKeyCallback) (Summary, error) {
 	summary := Summary{
 		Droplet:  state.Name,
 		PublicIP: state.PublicIP,
@@ -178,7 +178,7 @@ func (d *Deployer) deployDroplet(ctx context.Context, state *provision.DropletSt
 		Host:    state.PublicIP,
 		Port:    d.Opts.SSHPort,
 		User:    state.Spec.UserOrDefault(),
-		Signer:  signer,
+		Signers: signers,
 		HostKey: hostKey,
 		MaxWait: d.Opts.ConnectTimeout,
 		OnRetry: func(attempt int, err error) {

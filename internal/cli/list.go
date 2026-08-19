@@ -8,6 +8,7 @@ import (
 
 	"github.com/digitalocean/godo"
 	"github.com/jeremyaboyd/doploy/internal/doclient"
+	"github.com/jeremyaboyd/doploy/internal/sshx"
 	"github.com/jeremyaboyd/doploy/internal/ui"
 	"github.com/spf13/cobra"
 )
@@ -25,8 +26,116 @@ func newListCmd() *cobra.Command {
 		newListSizesCmd(),
 		newListRegionsCmd(),
 		newListDNSCmd(),
+		newListSSHCmd(),
 	)
 	return cmd
+}
+
+func newListSSHCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:     "ssh [local]",
+		Aliases: []string{"keys"},
+		Short:   "List SSH keys on the account, or doploy's local keys and trusted hosts",
+		Long: `Lists the SSH public keys on the DigitalOcean account -- the names that
+` + "`ssh_keys:`" + ` in a spec can reference -- and marks the ones whose private key
+is in doploy's local key store.
+
+With "local", lists the store itself (keys created by ` + "`doploy add ssh`" + `) and
+the droplet host keys doploy has recorded in its known_hosts file.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateOutput(); err != nil {
+				return err
+			}
+			if len(args) == 1 {
+				if args[0] != "local" {
+					return fmt.Errorf("unknown argument %q: the only argument `list ssh` takes is \"local\"", args[0])
+				}
+				return listLocalSSH()
+			}
+			client, err := apiClient()
+			if err != nil {
+				return err
+			}
+			return listAccountSSH(cmd.Context(), client)
+		},
+	}
+}
+
+func listAccountSSH(ctx context.Context, client *godo.Client) error {
+	keys, err := doclient.Paginate(func(opt *godo.ListOptions) ([]godo.Key, *godo.Response, error) {
+		return client.Keys.List(ctx, opt)
+	})
+	if err != nil {
+		return fmt.Errorf("listing SSH keys: %w", err)
+	}
+
+	stored, err := sshx.ListStoredKeys()
+	if err != nil {
+		return err
+	}
+	// The API reports the legacy MD5 fingerprint, so match on that.
+	local := map[string]bool{}
+	for _, k := range stored {
+		local[k.FingerprintMD5] = true
+	}
+
+	if jsonOutput() {
+		return ui.JSON(keys)
+	}
+
+	sort.Slice(keys, func(i, j int) bool { return keys[i].Name < keys[j].Name })
+
+	table := ui.NewTable("NAME", "ID", "FINGERPRINT", "LOCAL")
+	for _, k := range keys {
+		managed := "-"
+		if local[k.Fingerprint] {
+			managed = "yes"
+		}
+		table.Row(k.Name, k.ID, k.Fingerprint, managed)
+	}
+	table.Print()
+
+	if table.Len() == 0 {
+		fmt.Println("\nNo SSH keys on this account. Create one with `doploy add ssh`.")
+	}
+	return nil
+}
+
+func listLocalSSH() error {
+	stored, err := sshx.ListStoredKeys()
+	if err != nil {
+		return err
+	}
+	trusted, err := sshx.TrustedHosts()
+	if err != nil {
+		return err
+	}
+
+	if jsonOutput() {
+		return ui.JSON(map[string]any{"keys": stored, "trusted_hosts": trusted})
+	}
+
+	fmt.Println("Local keys (doploy's key store):")
+	keyTable := ui.NewTable("NAME", "FINGERPRINT", "PATH")
+	for _, k := range stored {
+		keyTable.Row(k.Name, dash(k.Fingerprint), k.Path)
+	}
+	keyTable.Print()
+	if keyTable.Len() == 0 {
+		fmt.Println("  (none; create one with `doploy add ssh`)")
+	}
+
+	fmt.Println("\nTrusted hosts (recorded on first connection):")
+	hostTable := ui.NewTable("HOST", "TYPE", "FINGERPRINT")
+	for _, h := range trusted {
+		hostTable.Row(strings.Join(h.Hosts, ","), h.Type, h.Fingerprint)
+	}
+	hostTable.Print()
+	if hostTable.Len() == 0 {
+		fmt.Println("  (none yet; hosts are recorded the first time doploy connects)")
+	}
+	return nil
 }
 
 func newListDNSCmd() *cobra.Command {
